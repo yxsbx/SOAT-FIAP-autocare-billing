@@ -1,0 +1,76 @@
+openapi: 3.1.0
+info:
+  title: AutoCare Hub Billing Service
+  version: 1.0.0
+paths:
+  /internal/v1/budgets/{budgetId}:
+    get:
+      operationId: getBudget
+      summary: Consulta orçamento, decisão e cobrança
+      security:
+        - InternalToken: []
+      parameters:
+        - name: budgetId
+          in: path
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Dados do orçamento
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Budget'
+        '400':
+          description: Parâmetro ou header obrigatório inválido
+        '401':
+          description: Token interno inválido ou desabilitado
+        '404':
+          description: Orçamento indisponível para consulta
+  /webhooks/mercado-pago:
+    post:
+      operationId: reconcileMercadoPagoOrder
+      summary: Concilia uma order QR pelo Mercado Pago
+      description: Disponível quando a integração com Mercado Pago está habilitada.
+      parameters:
+        - name: data.id
+          in: query
+          required: true
+          schema: {type: string}
+        - name: x-signature
+          in: header
+          required: true
+          schema: {type: string}
+        - name: x-request-id
+          in: header
+          required: true
+          schema: {type: string}
+      responses:
+        '200':
+          description: Notificação processada
+        '400':
+          description: Query ou header obrigatório ausente
+        '401':
+          description: Assinatura inválida
+        '500':
+          description: A conciliação falhou e pode ser repetida pelo provedor
+components:
+  securitySchemes:
+    InternalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Service-Token
+  schemas:
+    Budget:
+      type: object
+      required: [budgetId, orderId, totalAmount]
+      properties:
+        budgetId: {type: string, format: uuid}
+        orderId: {type: string, format: uuid}
+        totalAmount: {type: number, minimum: 0, multipleOf: 0.01}
+        decision:
+          enum: [APPROVED, REJECTED, null]
+        paymentStatus:
+          enum: [PENDING_CREATION, AWAITING_PAYMENT, CONFIRMED, EXPIRED, CANCELED, REFUNDED, REVIEW_REQUIRED, REFUND_PENDING, REFUND_REVIEW_REQUIRED, null]
+        qrData:
+          type: [string, 'null']

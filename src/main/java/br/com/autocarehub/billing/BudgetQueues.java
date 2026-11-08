@@ -13,7 +13,9 @@ class BudgetQueues {
                 withDeadLetter(BudgetMessages.REQUESTS),
                 QueueBuilder.durable(BudgetMessages.REQUESTS + ".dead").build(),
                 withDeadLetter(BudgetMessages.DECISIONS),
-                QueueBuilder.durable(BudgetMessages.DECISIONS + ".dead").build());
+                QueueBuilder.durable(BudgetMessages.DECISIONS + ".dead").build(),
+                withDeadLetter(PaymentWorkflow.REPAIR_REFUNDS),
+                QueueBuilder.durable(PaymentWorkflow.REPAIR_REFUNDS + ".dead").build());
     }
 
     private org.springframework.amqp.core.Queue withDeadLetter(String name) {

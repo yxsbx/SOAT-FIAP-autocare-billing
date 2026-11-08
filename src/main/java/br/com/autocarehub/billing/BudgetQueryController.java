@@ -31,8 +31,11 @@ class BudgetQueryController {
         }
         return jdbc.sql(
                         """
-                SELECT b.order_id, b.total_amount, b.decision, p.status, p.qr_data
-                FROM budgets b LEFT JOIN payments p ON p.budget_id = b.request_id WHERE b.request_id = ?
+                SELECT b.order_id, b.total_amount, b.decision, CASE WHEN p.status = 'CONFIRMED' AND p.refund_review_required THEN 'REFUND_REVIEW_REQUIRED'
+                            WHEN p.status = 'CONFIRMED' AND p.refund_requested_at IS NOT NULL THEN 'REFUND_PENDING'
+                            WHEN p.creation_review_required THEN 'REVIEW_REQUIRED' ELSE p.status END,
+                       p.qr_data
+                FROM budgets b LEFT JOIN payments p ON p.budget_id = b.request_id WHERE b.request_id = ? AND b.generation_failure IS NULL
                 """)
                 .param(budgetId)
                 .query((rs, row) -> new BudgetView(

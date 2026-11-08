@@ -1,5 +1,6 @@
 package br.com.autocarehub.billing;
 
+import br.com.autocarehub.telemetry.MessageTrace;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import org.springframework.amqp.core.MessageDeliveryMode;
@@ -25,15 +26,15 @@ class BudgetPublisher {
     public void publish() throws Exception {
         var pending = jdbc.sql(
                         """
-                        SELECT request_id, response_payload FROM budgets
+                        SELECT request_id, response_payload, trace_context FROM budgets
                         WHERE published_at IS NULL ORDER BY created_at, request_id
                         LIMIT 1 FOR UPDATE SKIP LOCKED
                         """)
-                .query((rs, row) -> new Pending(rs.getObject(1, UUID.class), rs.getString(2)))
+                .query((rs, row) -> new Pending(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3)))
                 .optional();
         if (pending.isPresent()) {
             var result = pending.get();
-            send(BudgetMessages.RESULTS, result.payload());
+            send(BudgetMessages.RESULTS, result.payload(), result.traceContext());
             jdbc.sql("UPDATE budgets SET published_at = CURRENT_TIMESTAMP WHERE request_id = ?")
                     .param(result.id())
                     .update();
@@ -45,38 +46,41 @@ class BudgetPublisher {
     public void publishEvents() throws Exception {
         var pending = jdbc.sql(
                         """
-                        SELECT event_id, routing_key, payload FROM billing_outbox
+                        SELECT event_id, routing_key, payload, trace_context FROM billing_outbox
                         WHERE published_at IS NULL ORDER BY created_at, event_id
                         LIMIT 1 FOR UPDATE SKIP LOCKED
                         """)
-                .query((rs, row) -> new Event(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3)))
+                .query((rs, row) ->
+                        new Event(rs.getObject(1, UUID.class), rs.getString(2), rs.getString(3), rs.getString(4)))
                 .optional();
         if (pending.isPresent()) {
             var event = pending.get();
-            send(event.routingKey(), event.payload());
+            send(event.routingKey(), event.payload(), event.traceContext());
             jdbc.sql("UPDATE billing_outbox SET published_at = CURRENT_TIMESTAMP WHERE event_id = ?")
                     .param(event.id())
                     .update();
         }
     }
 
-    private void send(String routingKey, String payload) throws Exception {
+    private void send(String routingKey, String payload, String traceContext) throws Exception {
         var confirmation = new CorrelationData(UUID.randomUUID().toString());
-        rabbit.convertAndSend(
-                "",
-                routingKey,
-                payload,
-                message -> {
-                    message.getMessageProperties().setDeliveryMode(MessageDeliveryMode.PERSISTENT);
-                    return message;
-                },
-                confirmation);
+        try (var scope = MessageTrace.restore(traceContext)) {
+            rabbit.convertAndSend(
+                    "",
+                    routingKey,
+                    payload,
+                    message -> {
+                        message.getMessageProperties().setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+                        return message;
+                    },
+                    confirmation);
+        }
         if (!confirmation.getFuture().get(5, TimeUnit.SECONDS).ack() || confirmation.getReturned() != null) {
             throw new IllegalStateException("RabbitMQ did not route the billing event");
         }
     }
 
-    private record Event(UUID id, String routingKey, String payload) {}
+    private record Event(UUID id, String routingKey, String payload, String traceContext) {}
 
-    private record Pending(UUID id, String payload) {}
+    private record Pending(UUID id, String payload, String traceContext) {}
 }

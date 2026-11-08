@@ -3,6 +3,7 @@ package br.com.autocarehub.billing;
 import java.math.BigDecimal;
 import java.net.URI;
 import java.net.http.HttpClient;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -70,6 +71,15 @@ class MercadoPagoOrders {
                 client.get().uri("/v1/orders/{id}", providerOrderId).retrieve().body(JsonNode.class));
     }
 
+    void refund(String providerOrderId, UUID budgetId) {
+        var key = UUID.nameUUIDFromBytes(("refund:" + budgetId).getBytes(StandardCharsets.UTF_8));
+        client.post()
+                .uri("/v1/orders/{id}/refund", providerOrderId)
+                .header("X-Idempotency-Key", key.toString())
+                .retrieve()
+                .toBodilessEntity();
+    }
+
     private ProviderOrder parse(JsonNode response) {
         if (response == null
                 || !"qr".equals(response.path("type").asString())
@@ -77,6 +87,13 @@ class MercadoPagoOrders {
             throw new IllegalStateException("Mercado Pago returned an unexpected order");
         }
         var payment = response.path("transactions").path("payments").path(0);
+        boolean refundInProgress = false;
+        for (JsonNode refund : response.path("transactions").path("refunds")) {
+            if (List.of("processing", "processed")
+                    .contains(refund.path("status").asString())) {
+                refundInProgress = true;
+            }
+        }
         return new ProviderOrder(
                 response.path("id").asString(),
                 response.path("external_reference").asString(),
@@ -85,7 +102,8 @@ class MercadoPagoOrders {
                 response.path("status").asString(),
                 payment.path("status").asString(),
                 payment.path("status_detail").asString(),
-                response.path("type_response").path("qr_data").asString(""));
+                response.path("type_response").path("qr_data").asString(""),
+                refundInProgress);
     }
 
     record ProviderOrder(
@@ -96,7 +114,8 @@ class MercadoPagoOrders {
             String status,
             String paymentStatus,
             String paymentDetail,
-            String qrData) {
+            String qrData,
+            boolean refundInProgress) {
         boolean matches(UUID budgetId, BigDecimal amount) {
             return id.matches("[A-Za-z0-9_-]{1,128}")
                     && budgetId.toString().equals(reference)

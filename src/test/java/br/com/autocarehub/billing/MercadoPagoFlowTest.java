@@ -34,6 +34,8 @@ class MercadoPagoFlowTest {
     private final UUID orderId = UUID.randomUUID();
     private final JsonMapper json = JsonMapper.builder().build();
     private final AtomicInteger calls = new AtomicInteger();
+    private final AtomicInteger refundCalls = new AtomicInteger();
+    private volatile String refundKey;
     private volatile String status = "created";
     private volatile String paymentDetail = "ready_to_process";
     private volatile String providerAmount = "75.00";
@@ -56,7 +58,11 @@ class MercadoPagoFlowTest {
                 .addScripts(
                         "db/migration/V1__create_budgets.sql",
                         "db/migration/V2__budget_decisions.sql",
-                        "db/migration/V3__payments.sql")
+                        "db/migration/V3__payments.sql",
+                        "db/migration/V4__budget_generation_failure.sql",
+                        "db/migration/V5__payment_creation_retry.sql",
+                        "db/migration/V6__repair_refund.sql",
+                        "db/migration/V7__outbox_trace_context.sql")
                 .build();
         jdbc = JdbcClient.create(db);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
@@ -136,6 +142,43 @@ class MercadoPagoFlowTest {
     }
 
     @Test
+    void stopsRetryingAndReconcilesALateProviderResult() throws Exception {
+        approve("75.00");
+        rejectCreate = true;
+        for (int attempt = 0; attempt < 6; attempt++) {
+            jdbc.sql("UPDATE payments SET next_attempt_at = CURRENT_TIMESTAMP").update();
+            payments.createPending();
+        }
+        assertThat(calls.get()).isEqualTo(5);
+        assertThat(new BudgetQueryController(jdbc, "internal")
+                        .get(budgetId, "internal")
+                        .paymentStatus())
+                .isEqualTo("REVIEW_REQUIRED");
+        assertThat(resultEvents()).isEmpty();
+
+        status = "processed";
+        paymentDetail = "accredited";
+        deliverWebhook();
+        deliverWebhook();
+        assertThat(status()).isEqualTo("CONFIRMED");
+        assertThat(resultEvents()).hasSize(1);
+    }
+
+    @Test
+    void stopsSendingWhenTheCreationWindowHasElapsed() {
+        approve("75.00");
+        jdbc.sql("UPDATE payments SET updated_at = ?")
+                .param(java.time.OffsetDateTime.now().minusMinutes(16))
+                .update();
+        payments.createPending();
+        assertThat(calls.get()).isZero();
+        assertThat(new BudgetQueryController(jdbc, "internal")
+                        .get(budgetId, "internal")
+                        .paymentStatus())
+                .isEqualTo("REVIEW_REQUIRED");
+    }
+
+    @Test
     void confirmsZeroAmountWithoutExternalCharge() {
         approve("0.00");
         payments.createPending();
@@ -152,6 +195,112 @@ class MercadoPagoFlowTest {
         deliverWebhook();
         assertThat(status()).isEqualTo("CANCELED");
         assertThat(resultEvents()).hasSize(1);
+    }
+
+    @Test
+    void recordsRefundWhenTheFirstWebhookAlreadyReportsIt() throws Exception {
+        approve("75.00");
+        payments.createPending();
+        status = "refunded";
+        deliverWebhook();
+        deliverWebhook();
+        assertThat(status()).isEqualTo("REFUNDED");
+        assertThat(resultEvents()).hasSize(1);
+    }
+
+    @Test
+    void submitsOneRefundAndWaitsForProviderConfirmation() throws Exception {
+        approve("75.00");
+        payments.createPending();
+        assertThatThrownBy(() -> payments.requestRefund(refundRequest()))
+                .hasMessageContaining("requires a confirmed payment");
+        status = "processed";
+        paymentDetail = "accredited";
+        deliverWebhook();
+        payments.requestRefund(refundRequest());
+        payments.requestRefund(refundRequest());
+
+        payments.processRefund();
+        jdbc.sql("UPDATE payments SET refund_next_attempt_at = CURRENT_TIMESTAMP")
+                .update();
+        payments.processRefund();
+        assertThat(refundCalls.get()).isEqualTo(1);
+        assertThat(refundKey).isNotBlank().isNotEqualTo(budgetId.toString());
+        assertThat(status()).isEqualTo("CONFIRMED");
+        assertThat(resultEvents()).hasSize(1);
+        assertThat(new BudgetQueryController(jdbc, "internal")
+                        .get(budgetId, "internal")
+                        .paymentStatus())
+                .isEqualTo("REFUND_PENDING");
+
+        status = "refunded";
+        jdbc.sql("UPDATE payments SET refund_next_attempt_at = CURRENT_TIMESTAMP")
+                .update();
+        payments.processRefund();
+        deliverWebhook();
+        assertThat(status()).isEqualTo("REFUNDED");
+        assertThat(resultEvents()).hasSize(2);
+        assertThat(refundCalls.get()).isEqualTo(1);
+    }
+
+    @Test
+    void reconcilesAnExpiredRefundReviewThroughTheSignedWebhook() throws Exception {
+        approve("75.00");
+        payments.createPending();
+        status = "processed";
+        paymentDetail = "accredited";
+        deliverWebhook();
+        payments.requestRefund(refundRequest());
+        jdbc.sql("UPDATE payments SET refund_requested_at = ?")
+                .param(java.time.OffsetDateTime.now().minusMinutes(16))
+                .update();
+
+        payments.processRefund();
+        assertThat(new BudgetQueryController(jdbc, "internal")
+                        .get(budgetId, "internal")
+                        .paymentStatus())
+                .isEqualTo("REFUND_REVIEW_REQUIRED");
+        assertThat(refundCalls.get()).isZero();
+        assertThat(resultEvents()).hasSize(1);
+
+        status = "refunded";
+        deliverWebhook();
+        deliverWebhook();
+        assertThat(status()).isEqualTo("REFUNDED");
+        assertThat(resultEvents()).hasSize(2);
+        assertThat(refundCalls.get()).isZero();
+    }
+
+    @Test
+    void republishesExistingRefundWhenRepairCompensationIsRequestedLater() throws Exception {
+        approve("75.00");
+        payments.createPending();
+        status = "processed";
+        paymentDetail = "accredited";
+        deliverWebhook();
+        status = "refunded";
+        deliverWebhook();
+        payments.requestRefund(refundRequest());
+        payments.requestRefund(refundRequest());
+        payments.processRefund();
+        assertThat(refundCalls.get()).isZero();
+        assertThat(resultEvents()).hasSize(3);
+    }
+
+    @Test
+    void closesRefundWithoutProviderChargeForZeroValue() {
+        approve("0.00");
+        payments.createPending();
+        payments.requestRefund(refundRequest());
+        payments.processRefund();
+        assertThat(status()).isEqualTo("REFUNDED");
+        assertThat(calls.get()).isZero();
+    }
+
+    private String refundRequest() {
+        return """
+                {"orderId":"%s","budgetId":"%s"}
+                """.formatted(orderId, budgetId);
     }
 
     @Test
@@ -193,6 +342,13 @@ class MercadoPagoFlowTest {
     private void provider(HttpExchange exchange) throws IOException {
         try (exchange) {
             calls.incrementAndGet();
+            if ("POST".equals(exchange.getRequestMethod())
+                    && exchange.getRequestURI().getPath().endsWith("/refund")) {
+                refundKey = exchange.getRequestHeaders().getFirst("X-Idempotency-Key");
+                refundCalls.incrementAndGet();
+                exchange.sendResponseHeaders(201, -1);
+                return;
+            }
             if ("POST".equals(exchange.getRequestMethod())) {
                 sentKey = exchange.getRequestHeaders().getFirst("X-Idempotency-Key");
                 sentAuthorization = exchange.getRequestHeaders().getFirst("Authorization");

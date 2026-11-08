@@ -43,7 +43,11 @@ class BudgetFlowTest {
                 .addScripts(
                         "db/migration/V1__create_budgets.sql",
                         "db/migration/V2__budget_decisions.sql",
-                        "db/migration/V3__payments.sql")
+                        "db/migration/V3__payments.sql",
+                        "db/migration/V4__budget_generation_failure.sql",
+                        "db/migration/V5__payment_creation_retry.sql",
+                        "db/migration/V6__repair_refund.sql",
+                        "db/migration/V7__outbox_trace_context.sql")
                 .build();
         jdbc = JdbcClient.create(db);
     }
@@ -71,7 +75,7 @@ class BudgetFlowTest {
         doAnswer(call -> {
                     var result = json.readValue((String) call.getArgument(2), BudgetMessages.Result.class);
                     assertThat(result)
-                            .isEqualTo(new BudgetMessages.Result(requestId, orderId, new BigDecimal("100.00")));
+                            .isEqualTo(new BudgetMessages.Result(requestId, orderId, new BigDecimal("100.00"), null));
                     MessagePostProcessor processor = call.getArgument(3);
                     assertThat(processor
                                     .postProcessMessage(new Message(new byte[0]))
@@ -127,7 +131,9 @@ class BudgetFlowTest {
                         BudgetMessages.REQUESTS,
                         BudgetMessages.REQUESTS + ".dead",
                         BudgetMessages.DECISIONS,
-                        BudgetMessages.DECISIONS + ".dead");
+                        BudgetMessages.DECISIONS + ".dead",
+                        PaymentWorkflow.REPAIR_REFUNDS,
+                        PaymentWorkflow.REPAIR_REFUNDS + ".dead");
     }
 
     @Test
@@ -184,6 +190,27 @@ class BudgetFlowTest {
                         .query(Boolean.class)
                         .list())
                 .containsExactly(true);
+    }
+
+    @Test
+    void recordsOnlyOneTerminalResultForAnOutOfRangeTotal() {
+        var consumer = new BudgetConsumer(jdbc, json);
+        var item = new BudgetMessages.Item(UUID.randomUUID(), "Serviço", 2, new BigDecimal("5000000000000.00"));
+        var payload = json.writeValueAsString(new BudgetMessages.Request(requestId, orderId, List.of(item)));
+        consumer.generate(payload);
+        consumer.generate(payload);
+
+        String response = jdbc.sql("SELECT response_payload FROM budgets")
+                .query(String.class)
+                .single();
+        assertThat(json.readTree(response).has("totalAmount")).isFalse();
+        assertThat(json.readValue(response, BudgetMessages.Result.class))
+                .isEqualTo(new BudgetMessages.Result(requestId, orderId, null, "TOTAL_LIMIT_EXCEEDED"));
+        assertThatThrownBy(() -> new BudgetQueryController(jdbc, "internal").get(requestId, "internal"))
+                .hasMessageContaining("404");
+        var decision = new BudgetMessages.Decide(requestId, orderId, BudgetMessages.Decision.APPROVED, "api", null);
+        assertThatThrownBy(() -> consumer.decide(json.writeValueAsString(decision)))
+                .isInstanceOf(org.springframework.dao.EmptyResultDataAccessException.class);
     }
 
     private boolean published() {

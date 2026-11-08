@@ -56,6 +56,9 @@ jobs:
   deploy:
     needs: publish
     runs-on: [self-hosted, autocare-deploy]
+    permissions:
+      contents: read
+      packages: read
     environment: ${{ github.ref_name == 'main' && 'production' || 'hml' }}
     steps:
       - uses: actions/checkout@v5
@@ -64,6 +67,8 @@ jobs:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
           LAB_EXPIRES_AT: ${{ vars.LAB_EXPIRES_AT }}
           DEPLOY_ENABLED: ${{ vars.AZURE_DEPLOY_ENABLED }}
+          GHCR_PULL_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
           test "$DEPLOY_ENABLED" = true
@@ -80,6 +85,20 @@ jobs:
             echo 'Use uma identidade limitada ao namespace' >&2
             exit 1
           fi
+          python3 - "$work/registry-patch.json" <<'PYTHON'
+          import base64
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          credentials = f"{os.environ['GHCR_USER']}:{os.environ['GHCR_PULL_TOKEN']}".encode()
+          auth = base64.b64encode(credentials).decode()
+          config = json.dumps({"auths": {"ghcr.io": {"auth": auth}}}).encode()
+          patch = {"data": {".dockerconfigjson": base64.b64encode(config).decode()}}
+          Path(sys.argv[1]).write_text(json.dumps(patch))
+          PYTHON
+          kubectl -n "$ns" patch secret autocare-billing-ghcr --type merge --patch-file "$work/registry-patch.json"
           image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
           kubectl -n "$ns" set image deployment/autocare-billing billing="$image"
           kubectl -n "$ns" rollout status deployment/autocare-billing --timeout=300s

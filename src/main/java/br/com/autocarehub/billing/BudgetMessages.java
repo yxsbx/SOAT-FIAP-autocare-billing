@@ -1,5 +1,6 @@
 package br.com.autocarehub.billing;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Objects;
@@ -27,7 +28,7 @@ final class BudgetMessages {
                     .reduce(BigDecimal.ZERO, BigDecimal::add)
                     .setScale(2);
             if (total.precision() > 15) {
-                throw new IllegalArgumentException("Budget total exceeds supported precision");
+                throw new TotalLimitExceeded();
             }
             return total;
         }
@@ -58,5 +59,12 @@ final class BudgetMessages {
 
     record Decided(UUID budgetId, UUID orderId, Decision decision) {}
 
-    record Result(UUID requestId, UUID orderId, BigDecimal totalAmount) {}
+    static final class TotalLimitExceeded extends IllegalArgumentException {
+        TotalLimitExceeded() {
+            super("Budget total exceeds supported precision");
+        }
+    }
+
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    record Result(UUID requestId, UUID orderId, BigDecimal totalAmount, String failure) {}
 }
