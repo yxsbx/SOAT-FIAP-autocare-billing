@@ -21,7 +21,15 @@ Os valores monetários são decimais com duas casas. O Billing usa `requestId` c
 mvn -B verify
 ```
 
-O CI exige 80% de cobertura de linhas, publica o relatório JaCoCo e monta a imagem Docker. O ensaio local da integração registrou **94,20% de cobertura de linhas** na revisão `0a8e42b`. O relatório JaCoCo local fica em `target/site/jacoco/index.html`. Em uma execução do CI para o SHA da entrega, consulte o artefato `billing-coverage` na página da execução. [Workflow de CI](https://github.com/yxsbx/SOAT-FIAP-autocare-billing/actions/workflows/ci.yml)
+O CI exige 80% de cobertura de linhas, publica o relatório JaCoCo e monta a imagem Docker. Em seguida, instala a imagem em um cluster kind temporário e aguarda a prontidão do Billing com PostgreSQL e RabbitMQ. Esse deploy de CI roda sem Azure ou credenciais externas. O ensaio local da integração registrou **94,20% de cobertura de linhas** na revisão `0a8e42b`. O relatório JaCoCo local fica em `target/site/jacoco/index.html`. Em uma execução do CI para o SHA da entrega, consulte o artefato `billing-coverage` na página da execução. [Workflow de CI](https://github.com/yxsbx/SOAT-FIAP-autocare-billing/actions/workflows/ci.yml)
+
+Para reproduzir o rollout com Docker, kind e kubectl instalados:
+
+```bash
+image="autocare-billing:$(git rev-parse HEAD)"
+docker build -t "$image" .
+bash scripts/smoke-kubernetes.sh "$image"
+```
 
 Para o ensaio local com os dois bancos e o RabbitMQ, use o `compose.phase4.yaml` no [repositório da OS](https://github.com/yxsbx/SOAT-FIAP-autocare-api). Configure `BILLING_DB_URL`, `BILLING_DB_USER`, `BILLING_DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_USER` e `RABBITMQ_PASSWORD` para iniciar o Billing fora do Compose.
 
