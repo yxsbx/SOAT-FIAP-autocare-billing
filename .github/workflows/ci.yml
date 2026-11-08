@@ -1,0 +1,121 @@
+name: Billing CI
+
+on:
+  push:
+    branches: [dev, hml, main]
+  pull_request:
+    branches: [dev, hml, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: mvn -B spotless:check verify
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: billing-coverage
+          path: target/site/jacoco/
+      - run: docker build -t autocare-billing:${{ github.sha }} .
+      - name: Install kind and kubectl
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64 \
+            --output "$RUNNER_TEMP/kind"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $RUNNER_TEMP/kind" |
+            sha256sum --check
+          curl --fail --silent --show-error --location \
+            https://dl.k8s.io/release/v1.37.1/bin/linux/amd64/kubectl \
+            --output "$RUNNER_TEMP/kubectl"
+          echo "65691ff77eb6fa44c908b77a1082c9f092c3b9733b5cefabec0d1104890e21a8  $RUNNER_TEMP/kubectl" |
+            sha256sum --check
+          chmod +x "$RUNNER_TEMP/kind" "$RUNNER_TEMP/kubectl"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Deploy and verify Billing in ephemeral Kubernetes
+        run: bash scripts/smoke-kubernetes.sh "autocare-billing:$GITHUB_SHA"
+
+  quality-sast:
+    runs-on: ubuntu-latest
+    container: semgrep/semgrep:1.143.0
+    steps:
+      - uses: actions/checkout@v5
+      - run: semgrep scan --config p/java --error --severity ERROR --metrics off .
+
+  publish:
+    if: vars.AZURE_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref_name == 'hml' || github.ref_name == 'main')
+    needs: [test-build, quality-sast]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Publish immutable image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image" .
+          docker push "$image"
+
+  deploy:
+    needs: publish
+    runs-on: [self-hosted, autocare-deploy]
+    permissions:
+      contents: read
+      packages: read
+    environment: ${{ github.ref_name == 'main' && 'production' || 'hml' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Apply and verify rollout
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          LAB_EXPIRES_AT: ${{ vars.LAB_EXPIRES_AT }}
+          DEPLOY_ENABLED: ${{ vars.AZURE_DEPLOY_ENABLED }}
+          GHCR_PULL_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          test "$DEPLOY_ENABLED" = true
+          test -n "$LAB_EXPIRES_AT"
+          test "$(date -u +%s)" -lt "$(date -u -d "$LAB_EXPIRES_AT" +%s)"
+          ns=homolog
+          if [[ "$GITHUB_REF_NAME" == main ]]; then ns=prod; fi
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          umask 077
+          printf '%s' "${KUBE_CONFIG:?KUBE_CONFIG is required}" > "$work/kubeconfig"
+          export KUBECONFIG="$work/kubeconfig"
+          if [[ "$(kubectl auth can-i create clusterroles)" == yes ]]; then
+            echo 'Use uma identidade limitada ao namespace' >&2
+            exit 1
+          fi
+          python3 - "$work/registry-patch.json" <<'PYTHON'
+          import base64
+          import json
+          import os
+          import sys
+          from pathlib import Path
+
+          credentials = f"{os.environ['GHCR_USER']}:{os.environ['GHCR_PULL_TOKEN']}".encode()
+          auth = base64.b64encode(credentials).decode()
+          config = json.dumps({"auths": {"ghcr.io": {"auth": auth}}}).encode()
+          patch = {"data": {".dockerconfigjson": base64.b64encode(config).decode()}}
+          Path(sys.argv[1]).write_text(json.dumps(patch))
+          PYTHON
+          kubectl -n "$ns" patch secret autocare-billing-ghcr --type merge --patch-file "$work/registry-patch.json"
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          kubectl -n "$ns" set image deployment/autocare-billing billing="$image"
+          kubectl -n "$ns" rollout status deployment/autocare-billing --timeout=300s
