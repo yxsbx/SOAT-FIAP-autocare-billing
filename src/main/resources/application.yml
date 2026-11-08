@@ -1,0 +1,34 @@
+spring:
+  application:
+    name: autocare-billing
+  datasource:
+    url: ${BILLING_DB_URL}
+    username: ${BILLING_DB_USER}
+    password: ${BILLING_DB_PASSWORD}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER}
+    password: ${RABBITMQ_PASSWORD}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
+    listener:
+      simple:
+        default-requeue-rejected: false
+        retry:
+          enabled: true
+          max-retries: 3
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,rabbit
+
+billing:
+  mercado-pago:
+    enabled: ${MERCADO_PAGO_ENABLED:false}

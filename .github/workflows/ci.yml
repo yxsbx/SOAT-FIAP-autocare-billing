@@ -1,0 +1,85 @@
+name: Billing CI
+
+on:
+  push:
+    branches: [dev, hml, main]
+  pull_request:
+    branches: [dev, hml, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - run: mvn -B spotless:check verify
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: billing-coverage
+          path: target/site/jacoco/
+      - run: docker build -t autocare-billing:${{ github.sha }} .
+
+  quality-sast:
+    runs-on: ubuntu-latest
+    container: semgrep/semgrep:1.143.0
+    steps:
+      - uses: actions/checkout@v5
+      - run: semgrep scan --config p/java --error --severity ERROR --metrics off .
+
+  publish:
+    if: vars.AZURE_DEPLOY_ENABLED == 'true' && github.event_name == 'push' && (github.ref_name == 'hml' || github.ref_name == 'main')
+    needs: [test-build, quality-sast]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Publish immutable image
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker build -t "$image" .
+          docker push "$image"
+
+  deploy:
+    needs: publish
+    runs-on: [self-hosted, autocare-deploy]
+    environment: ${{ github.ref_name == 'main' && 'production' || 'hml' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Apply and verify rollout
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+          LAB_EXPIRES_AT: ${{ vars.LAB_EXPIRES_AT }}
+          DEPLOY_ENABLED: ${{ vars.AZURE_DEPLOY_ENABLED }}
+        run: |
+          set -euo pipefail
+          test "$DEPLOY_ENABLED" = true
+          test -n "$LAB_EXPIRES_AT"
+          test "$(date -u +%s)" -lt "$(date -u -d "$LAB_EXPIRES_AT" +%s)"
+          ns=homolog
+          if [[ "$GITHUB_REF_NAME" == main ]]; then ns=prod; fi
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          umask 077
+          printf '%s' "${KUBE_CONFIG:?KUBE_CONFIG is required}" > "$work/kubeconfig"
+          export KUBECONFIG="$work/kubeconfig"
+          if [[ "$(kubectl auth can-i create clusterroles)" == yes ]]; then
+            echo 'Use uma identidade limitada ao namespace' >&2
+            exit 1
+          fi
+          image="ghcr.io/${GITHUB_REPOSITORY,,}:$GITHUB_SHA"
+          kubectl -n "$ns" set image deployment/autocare-billing billing="$image"
+          kubectl -n "$ns" rollout status deployment/autocare-billing --timeout=300s
