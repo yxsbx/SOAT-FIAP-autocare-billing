@@ -21,9 +21,9 @@ Os valores monetários são decimais com duas casas. O Billing usa `requestId` c
 mvn -B verify
 ```
 
-O CI exige 80% de cobertura de linhas, publica o relatório JaCoCo e monta a imagem Docker. O relatório JaCoCo local fica em `target/site/jacoco/index.html`. Em uma execução do CI para o SHA da entrega, consulte o artefato `billing-coverage` na página da execução. [Workflow de CI](https://github.com/yxsbx/SOAT-FIAP-autocare-billing/actions/workflows/ci.yml)
+O CI exige 80% de cobertura de linhas, publica o relatório JaCoCo e monta a imagem Docker. O ensaio local da integração registrou **94,20% de cobertura de linhas** na revisão `0a8e42b`. O relatório JaCoCo local fica em `target/site/jacoco/index.html`. Em uma execução do CI para o SHA da entrega, consulte o artefato `billing-coverage` na página da execução. [Workflow de CI](https://github.com/yxsbx/SOAT-FIAP-autocare-billing/actions/workflows/ci.yml)
 
-Para o ensaio local com os dois bancos e o RabbitMQ, use o [Compose da API](https://github.com/yxsbx/SOAT-FIAP-autocare-api/blob/main/compose.phase4.yaml). Configure `BILLING_DB_URL`, `BILLING_DB_USER`, `BILLING_DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_USER` e `RABBITMQ_PASSWORD` para iniciar o Billing fora do Compose.
+Para o ensaio local com os dois bancos e o RabbitMQ, use o `compose.phase4.yaml` no [repositório da OS](https://github.com/yxsbx/SOAT-FIAP-autocare-api). Configure `BILLING_DB_URL`, `BILLING_DB_USER`, `BILLING_DB_PASSWORD`, `RABBITMQ_HOST`, `RABBITMQ_USER` e `RABBITMQ_PASSWORD` para iniciar o Billing fora do Compose.
 
 
 A consulta interna `GET /internal/v1/budgets/{budgetId}` exige `X-Internal-Service-Token`, configurado com `BILLING_INTERNAL_TOKEN`. Para testar o provedor, use o cenário BDD da API. O ambiente com credenciais de teste do Mercado Pago exige `MERCADO_PAGO_ENABLED`, `MERCADO_PAGO_ACCESS_TOKEN`, `MERCADO_PAGO_EXTERNAL_POS_ID`, `MERCADO_PAGO_WEBHOOK_SECRET` e a rota HTTPS `/webhooks/mercado-pago`. [Orders QR](https://www.mercadopago.com.br/developers/pt/docs/qr-code/payment-processing)
@@ -39,3 +39,5 @@ Crie a loja e o caixa usando as credenciais de teste. Configure `MERCADO_PAGO_EX
 Gere o QR ao aprovar um orçamento, use a conta de teste compradora no aplicativo do Mercado Pago e confira a confirmação em Billing e na OS. Guarde o identificador da order do provedor e o `orderId` da OS como evidência. [Compra de teste](https://www.mercadopago.com.br/developers/pt/docs/qr-code/test-integration/test-purchase)
 
 O contrato HTTP está em [OpenAPI](docs/api/openapi.yaml).
+
+[Arquitetura e procedimentos da Fase 4](https://github.com/yxsbx/SOAT-FIAP-autocare-docs)
